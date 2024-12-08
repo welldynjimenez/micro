@@ -1,0 +1,440 @@
+/* MQTT over SSL Example
+
+   This example code is in the Public Domain (or CC0 licensed, at your option.)
+
+   Unless required by applicable law or agreed to in writing, this
+   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+   CONDITIONS OF ANY KIND, either express or implied.
+*/
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include "esp_system.h"
+#include "esp_partition.h"
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "protocol_examples_common.h"
+#include "esp_mac.h"
+#include "esp_log.h"
+#include "mqtt_client.h"
+#include "esp_tls.h"
+#include "esp_ota_ops.h"
+#include <sys/param.h>
+
+static const char *TAG = "mqtts_example";
+static void mqtt_event_handler();
+esp_mqtt_client_handle_t client;
+
+#define STATE_INIT 0
+#define STATE_CERRADO 1
+#define STATE_ABRIENDO 2
+#define STATE_ABIERTO 3
+#define STATE_CERRANDO 4
+#define STATE_ERR0R 5
+#define TRUE 1
+#define FALSE 0
+#define RT_MAX 180000
+#define pin_blinky1 2
+
+typedef int mifuncion;
+
+mifuncion FUNC_CLOSED();
+mifuncion FUNC_INIT();
+mifuncion FUNC_OPENING();
+mifuncion FUNC_OPENED();
+mifuncion FUNC_CLOSING();
+mifuncion FUNC_ERR0R();
+
+
+struct IO_VAR
+{
+    unsigned int LSA : 1;
+    unsigned int LSC : 1;
+    unsigned int BPP : 1;
+    unsigned int LED1 : 1;
+    unsigned int LED2 : 1;
+    unsigned int LED3 : 1;
+    unsigned int MO : 1;
+    unsigned int MC : 1;
+    unsigned int RT : 1;
+    unsigned int M_ST: 1;
+
+} io_var;
+
+int STATE_ACTUAL = STATE_INIT;
+int STATE_SIG = STATE_INIT;
+int STATE_ANTERIOR = STATE_INIT;
+
+
+
+//
+// Note: this function is for testing purposes only publishing part of the active partition
+//       (to be checked against the original binary)
+//
+
+/*
+ * @brief Event handler registered to receive MQTT events
+ *
+ *  This function is called by the MQTT client event loop.
+ *
+ * @param handler_args user data registered to the event.
+ * @param base Event base for the handler(always MQTT Base in this example).
+ * @param event_id The id for the received event.
+ * @param event_data The data for the event, esp_mqtt_event_handle_t.
+ */
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
+    esp_mqtt_event_handle_t event = event_data;
+    client = event->client;
+    int msg_id;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/BPP", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/LSA", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/LSC", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+
+
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/STATE_ACT", 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+        
+
+    case MQTT_EVENT_UNSUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+
+        char topico_MQTT [100];                                 
+        strncpy(topico_MQTT, event->topic, event->topic_len);   
+        topico_MQTT [event->topic_len] = '\0';                  
+
+        char dato_MQTT [100];                                   
+        strncpy(dato_MQTT, event->data, event->data_len);       
+        dato_MQTT [event->data_len] = '\0';                     
+
+         if((strcmp(topico_MQTT, "/topic/BPP")) == (strcmp(dato_MQTT, "1")))
+        {
+            ESP_LOGI(TAG, "Sending the binary");
+            io_var.BPP=TRUE;
+            strcpy(dato_MQTT, "0");
+        }
+
+         if((strcmp(topico_MQTT, "/topic/LSA")) == (strcmp(dato_MQTT, "1")))
+        {
+            ESP_LOGI(TAG, "Sending the binary");
+            io_var.LSA=TRUE;
+        }
+        else
+        {
+            io_var.LSA=FALSE;
+        }
+        
+
+         if((strcmp(topico_MQTT, "/topic/LSC")) == (strcmp(dato_MQTT, "1")))
+        {
+            ESP_LOGI(TAG, "Sending the binary");
+            io_var.LSC=TRUE;
+        }
+        else
+        {
+            io_var.LSC=FALSE;
+        }
+
+        break;
+
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGI(TAG, "Last error code reported from esp-tls: 0x%x", event->error_handle->esp_tls_last_esp_err);
+            ESP_LOGI(TAG, "Last tls stack error number: 0x%x", event->error_handle->esp_tls_stack_err);
+            ESP_LOGI(TAG, "Last captured errno : %d (%s)",  event->error_handle->esp_transport_sock_errno,
+                     strerror(event->error_handle->esp_transport_sock_errno));
+        } else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+            ESP_LOGI(TAG, "Connection refused error: 0x%x", event->error_handle->connect_return_code);
+        } else {
+            ESP_LOGW(TAG, "Unknown error type: 0x%x", event->error_handle->error_type);
+        }
+        break;
+    default:
+        ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+static void mqtt_app_start(void)
+{
+    const esp_mqtt_client_config_t mqtt_cfg = {
+        .broker = {
+            .address.uri = CONFIG_BROKER_URI
+        },
+    };
+
+    ESP_LOGI(TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+}
+
+int msg_mqtt;
+
+void app_main()
+{
+    ESP_LOGI(TAG, "[APP] Startup..");
+    ESP_LOGI(TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
+
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set("esp-tls", ESP_LOG_VERBOSE);
+    esp_log_level_set("mqtt_client", ESP_LOG_VERBOSE);
+    esp_log_level_set("mqtt_example", ESP_LOG_VERBOSE);
+    esp_log_level_set("transport_base", ESP_LOG_VERBOSE);
+    esp_log_level_set("transport", ESP_LOG_VERBOSE);
+    esp_log_level_set("outbox", ESP_LOG_VERBOSE);
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
+     * Read "Establishing Wi-Fi or Ethernet Connection" section in
+     * examples/protocols/README.md for more information about this function.
+     */
+    ESP_ERROR_CHECK(example_connect());
+    mqtt_app_start();
+    
+    while (1)
+    {
+        // Lógica de la función
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Pequeño retraso
+        ESP_LOGI(TAG, "Estoy dentro de la maquina de estado");
+        if (STATE_ACTUAL == STATE_INIT)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO INICIAL", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+            STATE_ACTUAL = FUNC_INIT();
+
+        }
+
+        if (STATE_ACTUAL == STATE_CERRADO)
+        {
+            STATE_ACTUAL = FUNC_CLOSED();
+        }
+
+        if (STATE_ACTUAL == STATE_ABRIENDO)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO ABRIENDO", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+            STATE_ACTUAL = FUNC_OPENING();
+            
+        }
+        
+        if (STATE_ACTUAL == STATE_CERRANDO)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO CERRANDO", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+            STATE_ACTUAL = FUNC_CLOSING();
+        }
+
+        if (STATE_ACTUAL == STATE_ABIERTO)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO ABIERTO", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+            STATE_ACTUAL = FUNC_OPENED();
+        }
+        
+        if (STATE_ACTUAL == STATE_ERR0R)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO ERROR", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+        }
+    }
+
+}
+
+int FUNC_INIT()
+{
+    STATE_ANTERIOR = STATE_INIT;
+    STATE_ACTUAL = STATE_INIT;
+    io_var.MO = FALSE;
+    io_var.MC = FALSE;
+    io_var.RT = FALSE;
+    io_var.LSA = FALSE;
+    io_var.LSC = FALSE;
+    io_var.M_ST= FALSE;
+    io_var.BPP= FALSE;
+    io_var.LED1 = TRUE;
+    io_var.LED2 = TRUE;
+    io_var.LED3 = TRUE;
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    io_var.LED2 = FALSE;
+    io_var.LED3 = FALSE;
+    
+    ESP_LOGI(TAG, "Estado INIT");
+
+    for (;;)
+    {
+        
+        if (io_var.LSA == FALSE && io_var.LSC == TRUE)
+        {
+            return STATE_CERRADO;
+        }
+
+        if ((io_var.LSA == TRUE && io_var.LSC == TRUE) || (io_var.LSA == FALSE && io_var.LSC == FALSE))
+        {
+            return STATE_CERRANDO;
+        }
+
+        if (io_var.LSA == TRUE && io_var.LSC == FALSE)
+        {
+            return STATE_CERRANDO;
+        }
+    }
+}
+
+int FUNC_OPENED(void)
+{
+
+    STATE_ANTERIOR = STATE_INIT;
+    STATE_ACTUAL = STATE_CERRADO;
+    STATE_SIG = STATE_ABRIENDO;
+    io_var.LED2 = TRUE;
+    io_var.LED3 = FALSE;
+    io_var.MO = FALSE;
+    io_var.MC = FALSE;
+    io_var.RT = FALSE;
+
+    msg_mqtt = esp_mqtt_client_publish(client, "/topic/BPP", "", 0, 0, 0);
+    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+    for (;;)
+    {
+        // Lógica de la función
+        vTaskDelay(100 / portTICK_PERIOD_MS); // Pequeño retraso
+        ESP_LOGI(TAG,"Tamo opened klk");
+        if (io_var.BPP == TRUE)
+        {
+            ESP_LOGI(TAG,"Tamo closin klk");
+            io_var.BPP=FALSE;
+            return STATE_CERRANDO;
+        }
+    }
+}
+
+int FUNC_CLOSED(void)
+{
+    msg_mqtt = esp_mqtt_client_publish(client, "/topic/STATE_ACT", "ESTADO CERRADO", 0, 0, 0);
+    STATE_ANTERIOR = STATE_INIT;
+    STATE_ACTUAL = STATE_CERRADO;
+    STATE_SIG = STATE_ABRIENDO;
+    io_var.LED2 = FALSE;
+    io_var.LED3 = FALSE;
+    io_var.MO = FALSE;
+    io_var.MC = FALSE;
+    io_var.RT = FALSE;
+    io_var.BPP = FALSE;
+    msg_mqtt = esp_mqtt_client_publish(client, "/topic/BPP", "", 0, 0, 0);
+    ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+
+    for (;;)
+    {
+        // Lógica de la función
+        vTaskDelay(1000 / portTICK_PERIOD_MS); // Pequeño retraso
+        ESP_LOGI(TAG,"Tamo closed klk");
+        if (io_var.BPP == TRUE)
+        {
+            ESP_LOGI(TAG,"Tamo openin klk");
+            io_var.BPP=FALSE;
+            return STATE_ABRIENDO;
+        }
+    }
+}
+
+int FUNC_OPENING(void)
+{
+
+    STATE_ANTERIOR = STATE_CERRADO;
+    STATE_ACTUAL = STATE_ABRIENDO;
+    STATE_SIG = STATE_ABIERTO;
+    io_var.LED2 = FALSE;
+    io_var.LED3 = FALSE;
+    io_var.MO = TRUE;
+    io_var.MC = FALSE;
+    io_var.RT = FALSE;
+    io_var.BPP = FALSE;
+
+        msg_mqtt = esp_mqtt_client_publish(client, "/topic/MOTOR", "1", 0, 0, 1);
+    
+    
+    esp_mqtt_client_publish(client, "/topic/LSA", "", 0, 0, 1);
+    for (;;)
+    {
+        
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        if (io_var.LSA == TRUE && io_var.LSC == FALSE)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/MOTOR", "0", 0, 0, 1);
+            return STATE_ABIERTO;
+        }
+        if (io_var.RT == TRUE)
+        {
+            return STATE_ERR0R;
+        }
+    }
+}
+
+int FUNC_CLOSING(void)
+{
+
+    STATE_ANTERIOR = STATE_ABIERTO;
+    STATE_ACTUAL = STATE_CERRANDO;
+    STATE_SIG = STATE_CERRADO;
+    io_var.LED2 = FALSE;
+    io_var.LED3 = FALSE;
+    io_var.MO = FALSE;
+    io_var.MC = TRUE;
+    io_var.RT = FALSE;
+    io_var.BPP = FALSE;
+
+        msg_mqtt = esp_mqtt_client_publish(client, "/topic/MOTOR", "1", 0, 0, 1);
+        ESP_LOGI(TAG, "MOTOL ABIELTO, msg_id=%d", msg_mqtt);
+
+    for (;;)
+    {
+        ESP_LOGI(TAG, "led closing 2");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/LSC", "", 0, 0, 0);
+            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_mqtt);
+        if (io_var.LSA == FALSE && io_var.LSC == TRUE)
+        {
+            msg_mqtt = esp_mqtt_client_publish(client, "/topic/MOTOR", "0", 0, 0, 1);
+            ESP_LOGI(TAG, "MOTOL ABIELTO, msg_id=%d", msg_mqtt);
+            return STATE_CERRADO;
+        }
+        if (io_var.RT == TRUE)
+        {
+            return STATE_ERR0R;
+        }
+    }
+}
