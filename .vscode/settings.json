@@ -1,0 +1,14 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.errorSquiggles": "disabled",
+  "idf.adapterTargetName": "esp32",
+  "files.associations": {
+    "freertos.h": "c",
+    "task.h": "c",
+    "timers.h": "c",
+    "queue.h": "c",
+    "stddef.h": "c"
+  },
+  "idf.portWin": "COM7",
+  "idf.flashType": "UART"
+}
